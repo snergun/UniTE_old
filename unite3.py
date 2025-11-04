@@ -6,6 +6,7 @@ import numpy as np
 import re
 import time
 import json
+import pickle
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from datasets import load_dataset
 
@@ -15,6 +16,7 @@ import argparse
 from utils.ans_process import *
 from utils.collate_fun import *
 from utils.extract_response import *
+from utils.nn_combiner import load_nn_combiner, nn_combine_and_sample
 
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
@@ -215,6 +217,9 @@ def ensemble_decoding(test):
     accelerator.wait_for_everyone()
     solution_list, pred_list, label_list, ori_ans_list, question_list = [], [], [], [], []
 
+    # Initialize cache structure for storing predictions
+    cache_data = []
+    question_id = 0
 
     if accelerator.is_main_process:
         iter_item = tqdm(ds_loader)
@@ -240,6 +245,17 @@ def ensemble_decoding(test):
         attention_mask3 = inputs3['attention_mask'].to(device3)
 
         input_length = [len(qs) for qs in input_ids1]
+
+        # Initialize cache for each question in batch (if caching is enabled)
+        if args.cache_predictions:
+            batch_cache = []
+            for q_idx in range(len(questions)):
+                batch_cache.append({
+                    'question_id': question_id + q_idx,
+                    'question_text': questions[q_idx],
+                    'answer': answers[q_idx],
+                    'generations': []
+                })
 
         for i in range(max_length):
             start_time = time.time()
@@ -296,8 +312,54 @@ def ensemble_decoding(test):
 
             v1_new, v2_new, v3_new = v1_update, v2_update, v3_update
 
+            # Cache predictions if enabled
+            if args.cache_predictions:
+                for batch_idx in range(len(v1_new)):
+                    # Convert tensor probabilities to float for serialization
+                    model1_probs = {}
+                    model2_probs = {}
+                    model3_probs = {}
+                    linear_combined = {}
 
-            next_token, v_avg, next_token_id1, next_token_id2, next_token_id3 = average_and_sample(v1_new,v2_new,v3_new,0.5, tokenizer1)
+                    for token in v1_new[batch_idx].keys():
+                        model1_probs[token] = [float(v1_new[batch_idx][token][0]), int(v1_new[batch_idx][token][1])]
+                        model2_probs[token] = [float(v2_new[batch_idx][token][0]), int(v2_new[batch_idx][token][1])]
+                        model3_probs[token] = [float(v3_new[batch_idx][token][0]), int(v3_new[batch_idx][token][1])]
+                        # Calculate linear combination for comparison
+                        linear_combined[token] = (1/3) * float(v1_new[batch_idx][token][0]) + (1/3) * float(v2_new[batch_idx][token][0]) + (1/3) * float(v3_new[batch_idx][token][0])
+
+                    generation_step = {
+                        'position': i,
+                        'union_vocab': vu[batch_idx],
+                        'model1_probs': model1_probs,
+                        'model2_probs': model2_probs,
+                        'model3_probs': model3_probs,
+                        'linear_combined': linear_combined,
+                    }
+                    batch_cache[batch_idx]['generations'].append(generation_step)
+
+            # Combine predictions: use NN or linear combination
+            if args.use_nn_combiner and nn_model is not None:
+                # Use neural network combination
+                next_token, v_avg, next_token_ids = nn_combine_and_sample(
+                    [v1_new, v2_new, v3_new], nn_model, vu, tokenizer1, device=device1
+                )
+                next_token_id1 = next_token_ids[0]
+                next_token_id2 = next_token_ids[1]
+                next_token_id3 = next_token_ids[2]
+            else:
+                # Use linear combination (original method)
+                next_token, v_avg, next_token_id1, next_token_id2, next_token_id3 = average_and_sample(v1_new,v2_new,v3_new,0.5, tokenizer1)
+
+            # Store selected token in cache
+            if args.cache_predictions:
+                for batch_idx in range(len(next_token)):
+                    batch_cache[batch_idx]['generations'][-1]['selected_token'] = next_token[batch_idx]
+                    batch_cache[batch_idx]['generations'][-1]['selected_token_id1'] = int(next_token_id1[batch_idx])
+                    batch_cache[batch_idx]['generations'][-1]['selected_token_id2'] = int(next_token_id2[batch_idx])
+                    batch_cache[batch_idx]['generations'][-1]['selected_token_id3'] = int(next_token_id3[batch_idx])
+                    # Store which method was used
+                    batch_cache[batch_idx]['generations'][-1]['combination_method'] = 'nn' if args.use_nn_combiner else 'linear'
 
             end_time = time.time()
             latency = start_time - end_time
@@ -358,6 +420,10 @@ def ensemble_decoding(test):
         solution_list.extend(ans_list)
         question_list.extend(questions)
 
+        # Add batch cache to overall cache data
+        if args.cache_predictions:
+            cache_data.extend(batch_cache)
+            question_id += len(questions)
 
 
     accelerator.print("======= waiting for everyone ==========")
@@ -377,6 +443,28 @@ def ensemble_decoding(test):
             {"question": qs, "original_sln": ori_ans, "pred_solution": solution, "pred": pred, "label": label},
             ensure_ascii=False) + "\n")
 
+    # Save cache if enabled
+    if args.cache_predictions:
+        accelerator.print("======= gathering cache data ==========")
+        gather_cache = gather_object(cache_data)
+
+        if accelerator.is_main_process:
+            cache_output = {
+                'metadata': {
+                    'dataset': test,
+                    'models': [args.model_path1, args.model_path2, args.model_path3],
+                    'num_models': 3,
+                    'num_questions': len(gather_cache),
+                    'max_new_tokens': args.max_new_tokens,
+                },
+                'data': gather_cache
+            }
+
+            accelerator.print(f"======= saving cache to {args.cache_predictions} ==========")
+            with open(args.cache_predictions, 'wb') as f:
+                pickle.dump(cache_output, f)
+            accelerator.print(f"Cache saved successfully. Total questions: {len(gather_cache)}")
+
 
 if __name__ == "__main__":
     arg_parse = argparse.ArgumentParser()
@@ -390,8 +478,10 @@ if __name__ == "__main__":
     arg_parse.add_argument("--output_file", type=str,
                            default="Your output path")
     arg_parse.add_argument("--per_device_batch_size", type=int, default=1)
-
     arg_parse.add_argument("--max_new_tokens", type=int, default=1)
+    arg_parse.add_argument("--cache_predictions", type=str, default=None, help="Path to save cached predictions for NN training")
+    arg_parse.add_argument("--use_nn_combiner", action="store_true", help="Use trained NN combiner instead of linear combination")
+    arg_parse.add_argument("--nn_model_path", type=str, default=None, help="Path to trained NN combiner model")
 
     args = arg_parse.parse_args()
 
@@ -470,6 +560,15 @@ if __name__ == "__main__":
         return_dict_in_generate=True,
         use_cache=True,
     )
+
+    # Load NN combiner if specified
+    nn_model = None
+    if args.use_nn_combiner:
+        if args.nn_model_path is None:
+            raise ValueError("--nn_model_path must be specified when using --use_nn_combiner")
+        print(f"Loading NN combiner from {args.nn_model_path}")
+        nn_model = load_nn_combiner(args.nn_model_path, num_models=3, device=device1)
+        print(f"NN combiner loaded successfully")
 
     # load_data
     test_dataset = load_dataset("json", data_files=args.test_set)['train']
