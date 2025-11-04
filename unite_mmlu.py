@@ -13,6 +13,8 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from accelerate.utils import gather_object
 
+from piece_wise_temp import TemperatureScaler
+from model_with_temp import ModelWithTemperature    
 
 def extract_math_answer(pred_str): #MMLU
     try:
@@ -397,7 +399,7 @@ if __name__ == "__main__":
     model1 = AutoModelForCausalLM.from_pretrained(model_path1, device_map=device1,
                                        attn_implementation="sdpa",
                                        torch_dtype=torch.float16).eval()
-
+    model1 = ModelWithTemperature(model1, TemperatureScaler(pieces=1, n_temp=1, init_val=1.0).to(device1))
 
     model2 = AutoModelForCausalLM.from_pretrained(model_path2, device_map=device2,
                                        attn_implementation="sdpa",

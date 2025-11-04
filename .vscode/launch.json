@@ -1,0 +1,29 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: MMLU Experiment",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/opt/conda/envs/unite/bin/python",
+            "program": "unite_mmlu.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--model_path1",
+                "Qwen/Qwen2-7B-Instruct",
+                "--model_path2",
+                "meta-llama/Llama-3.1-8B",
+                "--output_file",
+                "mmlu_results",
+                "--test_set",
+                "datasets/MMLU/test",
+                "--prompts",
+                "datasets/MMLU/dev",
+            ]
+        }
+    ]
+}

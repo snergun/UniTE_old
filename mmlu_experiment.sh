@@ -1,0 +1,1 @@
+python unite_mmlu.py --model_path1 Qwen/Qwen2-7B-Instruct --model_path2 meta-llama/Llama-3.2-1B-Instruct --output_file mmlu_results
