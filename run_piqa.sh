@@ -1,0 +1,1 @@
+python unite2.py --model_path1 Qwen/Qwen2-7B-Instruct --model_path2 meta-llama/Llama-3.2-1B-Instruct --output_file results/piqa_results --max_new_tokens 1 --prompts datasets/PIQA/dev_our.jsonl --test_set datasets/PIQA/train_our.jsonl

@@ -1,0 +1,1 @@
+python unite2.py --model_path1 Qwen/Qwen2-7B-Instruct --model_path2 meta-llama/Llama-3.2-1B-Instruct --output_file gsm_results --max_new_tokens 512 --prompts datasets/GSM/gsm_prompt.txt --test_set datasets/GSM/test.cleand.jsonl
